@@ -1,0 +1,50 @@
+name: Agentek image
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: agentek-image-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Test, build and push
+    runs-on: [self-hosted, agentek]
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: windbit/shared-actions/checkout_submodules@master
+        with:
+          token: ${{ secrets.SUBMODULES_TOKEN }}
+          paths: py-core
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.11"
+      - run: uv sync --frozen --group dev
+      - run: uv run pytest -q tests
+
+      - uses: docker/login-action@v4
+        if: github.event_name == 'push'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: agentek/Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name == 'push' }}
+          tags: |
+            ghcr.io/windbit/agentek-google-mcp:${{ github.sha }}
+            ${{ github.ref == 'refs/heads/main' && 'ghcr.io/windbit/agentek-google-mcp:latest' || '' }}
+          provenance: false

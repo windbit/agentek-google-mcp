@@ -20,6 +20,7 @@ from googleapiclient.http import MediaIoBaseUpload
 from mcp.types import ToolAnnotations
 
 # Auth & server utilities
+from agentek.drive_fallback import document_metadata, is_not_found
 from auth.service_decorator import require_google_service, require_multiple_services
 from core.file_limits import (
     FileTooLargeError,
@@ -311,15 +312,7 @@ async def get_doc_content(
         f"[get_doc_content] Invoked. Document/File ID: '{document_id}', tab: '{tab_id}' for user '{user_google_email}'"
     )
 
-    file_metadata = await asyncio.to_thread(
-        drive_service.files()
-        .get(
-            fileId=document_id,
-            fields="id, name, mimeType, webViewLink, size",
-            supportsAllDrives=True,
-        )
-        .execute
-    )
+    file_metadata = await document_metadata(drive_service, docs_service, document_id)
     mime_type = file_metadata.get("mimeType", "")
     file_name = file_metadata.get("name", "Unknown File")
     web_view_link = file_metadata.get("webViewLink", "#")
@@ -2799,19 +2792,25 @@ async def get_doc_as_markdown(
     page_token = None
 
     while True:
-        response = await asyncio.to_thread(
-            drive_service.comments()
-            .list(
-                fileId=document_id,
-                fields="comments(id,content,author,createdTime,modifiedTime,"
-                "resolved,quotedFileContent,"
-                "replies(id,content,author,createdTime,modifiedTime)),"
-                "nextPageToken",
-                includeDeleted=False,
-                pageToken=page_token,
+        try:
+            response = await asyncio.to_thread(
+                drive_service.comments()
+                .list(
+                    fileId=document_id,
+                    fields="comments(id,content,author,createdTime,modifiedTime,"
+                    "resolved,quotedFileContent,"
+                    "replies(id,content,author,createdTime,modifiedTime)),"
+                    "nextPageToken",
+                    includeDeleted=False,
+                    pageToken=page_token,
+                )
+                .execute
             )
-            .execute
-        )
+        except HttpError as error:
+            # Document outside drive.file: Drive hides its comments, the text is already fetched.
+            if is_not_found(error):
+                return markdown
+            raise
         all_comments.extend(response.get("comments", []))
         page_token = response.get("nextPageToken")
         if not page_token:

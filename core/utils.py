@@ -2,6 +2,8 @@ import base64
 import io
 import json
 import logging
+
+from agentek.errors import http_error_message as agentek_http_error_message
 import os
 import posixpath
 import re
@@ -1196,6 +1198,10 @@ def handle_http_errors(
                             f"{APPS_SCRIPT_USER_SETTINGS_URL}, turn on 'Google Apps "
                             f"Script API', wait a minute, and retry."
                         )
+                    elif agentek_message := agentek_http_error_message(
+                        tool_name, error.resp.status
+                    ):
+                        message = agentek_message
                     elif error.resp.status in [401, 403]:
                         # Authentication/authorization errors
                         if is_oauth21_enabled():

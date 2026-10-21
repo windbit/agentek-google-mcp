@@ -1,0 +1,3 @@
+[submodule "py-core"]
+	path = py-core
+	url = ../py-core

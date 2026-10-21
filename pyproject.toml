@@ -9,7 +9,7 @@ description = "Comprehensive, highly performant Google Workspace Streamable HTTP
 readme = "README.md"
 keywords = [ "mcp", "google", "workspace", "llm", "ai", "claude", "model", "context", "protocol", "server"]
 license = "MIT"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
  "fastapi>=0.133.0",
  "fastmcp>=4.0.10",
@@ -29,6 +29,7 @@ dependencies = [
  "pytz>=2026.1.post1",
  "tzdata>=2026.1",
  "markdown-it-py>=3.0.0",
+ "windbit-core",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -171,3 +172,6 @@ constraint-dependencies = [
     "pyasn1>=0.6.4",  # GHSA: REAL-decode resource consumption, quadratic OID DoS
     "oauthlib>=4.0.0", # GHSA-hj66-6f7g-4r5v: revocation endpoint JSONP injection
 ]
+
+[tool.uv.sources]
+windbit-core = { path = "py-core", editable = true }

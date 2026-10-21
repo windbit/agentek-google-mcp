@@ -545,6 +545,9 @@ async def resolve_folder_id(
     """
     Resolve a folder ID that might be a shortcut and ensure the final target is a folder.
     """
+    if folder_id == "root":
+        # With drive.file the Drive root metadata is unavailable (404), and "root" is a folder anyway.
+        return folder_id
     resolved_id, metadata = await resolve_drive_item(
         service,
         folder_id,
