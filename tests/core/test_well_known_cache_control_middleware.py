@@ -373,4 +373,3 @@ def test_configured_server_applies_no_cache_to_served_oauth_discovery_routes(
     # Ensure we did not create a shadow route at the wrong path.
     wrong_path = client.get("/.well-known/oauth-protected-resource")
     assert wrong_path.status_code == 404
-

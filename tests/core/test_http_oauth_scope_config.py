@@ -275,10 +275,6 @@ def test_configure_server_for_http_rejects_external_provider_without_jwt_key(
         server_module.configure_server_for_http()
 
 
-
-
-
-
 TOOL_CHALLENGE_SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -320,4 +316,3 @@ def test_unauthenticated_request_challenges_with_tool_scopes():
         f'scope="{" ".join(TOOL_CHALLENGE_SCOPES)}"'
         in (response.headers["www-authenticate"])
     )
-
