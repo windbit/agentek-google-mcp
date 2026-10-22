@@ -39,6 +39,13 @@ from auth.oauth_responses import (
     create_server_error_response,
 )
 from auth.scopes import PROTOCOL_AUTH_SCOPES, SCOPES, get_current_scopes  # noqa
+from auth.external_oauth_provider import GoogleProxyAdapter
+from core.tool_registry import granted_scopes_tool_filter
+from core.utils import enable_agentek_error_texts
+from windbit_core.logger import configure_logging
+from windbit_core.mcp.consent import ConsentAppearance
+from windbit_core.mcp.oauth_proxy import OAuthProxyProvider, ProxyOptions
+from windbit_core.mcp.store import MemoryOAuthStore
 from core.config import (
     USER_GOOGLE_EMAIL,
     get_transport_mode,
@@ -48,6 +55,7 @@ from core.config import (
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 import fastmcp
 from fastmcp import FastMCP
+from fastmcp.server.dependencies import get_access_token
 from auth.google_oauth_provider import GoogleProvider
 from fastmcp.server.lifespan import lifespan
 from mcp.types import ToolAnnotations, Icon
@@ -730,35 +738,14 @@ def configure_server_for_http():
 
             # Check if external OAuth provider is configured
             if config.is_external_oauth21_provider():
-                # External OAuth mode: use custom provider that handles ya29.* access tokens
-                from auth.external_oauth_provider import (
-                    ExternalOAuthProvider,
-                    get_token_validation_workers,
-                    get_token_validation_cache_ttl,
-                )
-
-                provider = ExternalOAuthProvider(
-                    client_id=config.client_id,
-                    client_secret=config.client_secret,
-                    base_url=config.get_oauth_base_url(),
-                    redirect_path=config.redirect_path,
-                    required_scopes=provider_valid_scopes,
-                    resource_server_url=config.get_oauth_base_url(),
-                    jwt_signing_key=jwt_signing_key,
-                    token_validation_workers=get_token_validation_workers(),
-                    token_validation_cache_ttl=get_token_validation_cache_ttl(),
-                    **expiry_kwargs,
-                )
+                # Agentek mode: the py-core OAuth proxy registers clients, shows the Agentek consent
+                # screen and passes Google tokens to the client (Hermes), which stores and refreshes them.
+                provider = build_agentek_oauth_proxy(config)
                 server.auth = provider
                 _oauth_client_storage = None
+                configure_agentek_mode(server)
+                logger.info("OAuth 2.1 enabled with the Agentek OAuth proxy")
 
-                logger.info("OAuth 2.1 enabled with EXTERNAL provider mode")
-                logger.info(
-                    "Expecting Authorization bearer tokens in tool call headers"
-                )
-                logger.info(
-                    "Protected resource metadata points to Google's authorization server"
-                )
             else:
                 # Standard OAuth 2.1 mode: use FastMCP's GoogleProvider
                 allowed_client_redirect_uris = _parse_allowed_redirect_uris(
@@ -1052,3 +1039,90 @@ async def start_google_auth(
     except Exception as e:
         logger.error(f"Failed to start Google authentication flow: {e}", exc_info=True)
         return f"**Error:** An unexpected error occurred: {e}"
+
+
+# --- Agentek integration -------------------------------------------------------------------
+
+AGENTEK_MCP_SCOPE = "google"
+# Upstream info logs carry user emails and file IDs.
+AGENTEK_QUIET_LOGGERS = (
+    "auth",
+    "core",
+    "gdrive",
+    "gdocs",
+    "gsheets",
+    "gslides",
+    "gcalendar",
+    "gcontacts",
+    "gtasks",
+    "gforms",
+)
+
+
+def build_agentek_oauth_proxy(
+    config, adapter: Optional[GoogleProxyAdapter] = None
+) -> OAuthProxyProvider:
+    return OAuthProxyProvider(
+        ProxyOptions(
+            public_url=_required_env("PUBLIC_URL"),
+            scopes=[AGENTEK_MCP_SCOPE],
+            consent=ConsentAppearance(
+                brand_name="Agentek",
+                service_name="Google",
+                cookie_prefix="google",
+                authorization_origins=["https://accounts.google.com"],
+                permission_names={
+                    AGENTEK_MCP_SCOPE: "Сервисы Google, которые вы отметите на следующем шаге"
+                },
+                extra_permissions=[
+                    "Google Документы, Таблицы и Презентации, к которым у вас есть доступ",
+                    "Файлы Google Диска, созданные агентом",
+                    "Календари, контакты, задачи и формы",
+                ],
+                provider_hint="На экране Google отметьте сервисы для агента или нажмите «Выбрать всё».",
+            ),
+            allowed_redirect_uris=_env_list("MCP_ALLOWED_REDIRECT_URIS", required=True),
+            trusted_cidrs=_env_list("MCP_TRUSTED_CIDRS", required=False),
+        ),
+        adapter=adapter
+        or GoogleProxyAdapter(
+            client_id=config.client_id, client_secret=config.client_secret
+        ),
+        store=MemoryOAuthStore(),
+    )
+
+
+def configure_agentek_mode(target: FastMCP) -> None:
+    enable_agentek_error_texts()
+    target.add_middleware(granted_scopes_tool_filter(target))
+    target.tool(
+        name="google_get_self",
+        title="Подключённый аккаунт Google",
+        annotations=ToolAnnotations(
+            readOnlyHint=True, idempotentHint=True, openWorldHint=False
+        ),
+    )(google_get_self)
+    configure_logging("agentek-google-mcp", quiet=AGENTEK_QUIET_LOGGERS)
+    # The uvicorn access log prints query strings with OAuth codes and state; py-core logs requests instead.
+    logging.getLogger("uvicorn.access").addFilter(lambda _record: False)
+
+
+async def google_get_self() -> dict:
+    """ID and email of the Google account connected to the agent."""
+    token = get_access_token()
+    claims = getattr(token, "claims", None) or {}
+    return {"sub": claims.get("sub"), "email": claims.get("email")}
+
+
+def _required_env(name: str) -> str:
+    value = os.environ.get(name, "").strip()
+    if not value:
+        raise RuntimeError(f"{name} is required")
+    return value
+
+
+def _env_list(name: str, *, required: bool) -> List[str]:
+    raw = os.environ.get(name, "")
+    if required and not raw.strip():
+        raise RuntimeError(f"{name} is required")
+    return [item.strip() for item in raw.replace("\n", ",").split(",") if item.strip()]

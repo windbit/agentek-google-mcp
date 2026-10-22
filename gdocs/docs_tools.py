@@ -20,7 +20,6 @@ from googleapiclient.http import MediaIoBaseUpload
 from mcp.types import ToolAnnotations
 
 # Auth & server utilities
-from agentek.drive_fallback import document_metadata, is_not_found
 from auth.service_decorator import require_google_service, require_multiple_services
 from core.file_limits import (
     FileTooLargeError,
@@ -88,6 +87,43 @@ from gdrive.drive_helpers import flag_incomplete_search, move_new_file_to_folder
 import json
 
 logger = logging.getLogger(__name__)
+
+_GOOGLE_DOC_MIME_TYPE = "application/vnd.google-apps.document"
+
+
+async def _document_metadata(
+    drive_service: Any, docs_service: Any, document_id: str
+) -> dict:
+    """File metadata from Drive; for a shared document outside drive.file Drive returns 404,
+    so the Docs API supplies the title."""
+    try:
+        return await asyncio.to_thread(
+            drive_service.files()
+            .get(
+                fileId=document_id,
+                fields="id, name, mimeType, webViewLink, size",
+                supportsAllDrives=True,
+            )
+            .execute
+        )
+    except HttpError as error:
+        if error.resp.status != 404:
+            raise
+    document = await asyncio.to_thread(
+        docs_service.documents().get(documentId=document_id, fields="title").execute
+    )
+    return {
+        "id": document_id,
+        "name": document.get("title", "Unknown File"),
+        "mimeType": _GOOGLE_DOC_MIME_TYPE,
+        "webViewLink": f"https://docs.google.com/document/d/{document_id}/edit",
+    }
+
+
+def _is_not_found(error: HttpError) -> bool:
+    return error.resp.status == 404
+
+
 HEADER_FOOTER_RUNTIME_CANARY = "docs-hf-canary-20260328b"
 
 # Field mask for inspect_doc_structure. It must name every field the structure
@@ -312,7 +348,7 @@ async def get_doc_content(
         f"[get_doc_content] Invoked. Document/File ID: '{document_id}', tab: '{tab_id}' for user '{user_google_email}'"
     )
 
-    file_metadata = await document_metadata(drive_service, docs_service, document_id)
+    file_metadata = await _document_metadata(drive_service, docs_service, document_id)
     mime_type = file_metadata.get("mimeType", "")
     file_name = file_metadata.get("name", "Unknown File")
     web_view_link = file_metadata.get("webViewLink", "#")
@@ -2808,7 +2844,7 @@ async def get_doc_as_markdown(
             )
         except HttpError as error:
             # Document outside drive.file: Drive hides its comments, the text is already fetched.
-            if is_not_found(error):
+            if _is_not_found(error):
                 return markdown
             raise
         all_comments.extend(response.get("comments", []))

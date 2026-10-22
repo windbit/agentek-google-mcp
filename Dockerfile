@@ -39,9 +39,16 @@ EXPOSE ${PORT:-8000}
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD sh -c 'curl -f http://localhost:${PORT:-8000}/health || exit 1'
 
-# Set environment variables for Python startup args
-ENV TOOL_TIER=""
-ENV TOOLS=""
+# Agentek integration: py-core OAuth proxy, stateless, read-only root filesystem.
+# FASTMCP_HOME moves FastMCP's own files to /tmp (an emptyDir in k8s).
+ENV MCP_ENABLE_OAUTH21=true \
+    EXTERNAL_OAUTH21_PROVIDER=true \
+    WORKSPACE_MCP_STATELESS_MODE=true \
+    WORKSPACE_MCP_DISABLE_LOCAL_FILES=true \
+    FASTMCP_HOME=/tmp/fastmcp \
+    PYTHONDONTWRITEBYTECODE=1 \
+    TOOL_TIER="complete" \
+    TOOLS="drive docs sheets slides calendar contacts tasks forms"
 
 # Use entrypoint for the base command and CMD for args
 ENTRYPOINT ["/bin/sh", "-c"]

@@ -8,10 +8,14 @@ permissions:
 
 jobs:
   pytest:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, agentek]
 
     steps:
       - uses: actions/checkout@v6
+      - uses: windbit/shared-actions/checkout_submodules@master
+        with:
+          token: ${{ secrets.SUBMODULES_TOKEN }}
+          paths: py-core
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'

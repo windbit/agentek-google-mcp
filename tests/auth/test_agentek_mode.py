@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import logging
 import secrets
 from urllib.parse import parse_qs, urlsplit
 
@@ -12,11 +13,15 @@ from googleapiclient.errors import HttpError
 from httplib2 import Response
 from windbit_core.mcp.oauth_proxy import GrantRejectedError, ProviderError
 
-from agentek import errors
-from agentek.app import install
-from agentek.drive_fallback import document_metadata
-from agentek.google_adapter import GoogleAdapter
-from agentek.scopes import granted_apis, tool_visible
+from auth.external_oauth_provider import GoogleProxyAdapter as GoogleAdapter
+from auth.scopes import granted_apis, tool_visible
+from core import utils as errors
+from core.server import (
+    AGENTEK_QUIET_LOGGERS,
+    build_agentek_oauth_proxy,
+    configure_agentek_mode,
+)
+from gdocs.docs_tools import _document_metadata as document_metadata
 
 PUBLIC = "https://testserver"
 CONSOLE_CB = "https://console.example/api/agents/1/mcp/google/oauth/a1/callback"
@@ -67,6 +72,21 @@ def fake_tool(name: str, scopes: list[str]):
     return tool
 
 
+@pytest.fixture(autouse=True)
+def restore_upstream_globals():
+    # configure_agentek_mode() turns Agentek error texts on and reconfigures logging process-wide;
+    # upstream tests expect their own texts and log levels.
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    quiet = {name: logging.getLogger(name).level for name in AGENTEK_QUIET_LOGGERS}
+    yield
+    errors._agentek_error_texts = False
+    root.handlers[:] = handlers
+    root.setLevel(level)
+    for name, quiet_level in quiet.items():
+        logging.getLogger(name).setLevel(quiet_level)
+
+
 @pytest.fixture
 def app(monkeypatch):
     monkeypatch.setenv("PUBLIC_URL", PUBLIC)
@@ -79,7 +99,8 @@ def app(monkeypatch):
         fake_tool("get_doc_content", [f"{G}drive.readonly", f"{G}documents.readonly"])
     )
     server.tool(fake_tool("read_sheet_values", [f"{G}spreadsheets.readonly"]))
-    install(server, adapter=google())
+    server.auth = build_agentek_oauth_proxy(None, adapter=google())
+    configure_agentek_mode(server)
     return server.http_app(path="/mcp", stateless_http=True)
 
 
@@ -278,12 +299,12 @@ async def test_verify_reports_temporary_failure():
 
 
 def test_error_texts_only_in_agentek_mode(monkeypatch):
-    monkeypatch.setattr(errors, "_enabled", False)
-    assert errors.http_error_message("t", 404) is None
-    errors.enable()
-    assert "недоступен интеграции" in errors.http_error_message("t", 404)
-    assert "временно недоступен" in errors.http_error_message("t", 503)
-    assert errors.http_error_message("t", 400) is None
+    monkeypatch.setattr(errors, "_agentek_error_texts", False)
+    assert errors.agentek_http_error_message("t", 404) is None
+    errors.enable_agentek_error_texts()
+    assert "недоступен интеграции" in errors.agentek_http_error_message("t", 404)
+    assert "временно недоступен" in errors.agentek_http_error_message("t", 503)
+    assert errors.agentek_http_error_message("t", 400) is None
 
 
 class _Request:
@@ -318,3 +339,33 @@ async def test_document_metadata_falls_back_to_docs_api():
 
     assert metadata["name"] == "Чужой документ"
     assert metadata["mimeType"] == "application/vnd.google-apps.document"
+
+
+def test_http_configuration_installs_agentek_proxy(monkeypatch):
+    from auth.oauth_config import reload_oauth_config
+    from core import server as server_module
+    from windbit_core.mcp.oauth_proxy import OAuthProxyProvider
+
+    for name, value in {
+        "MCP_ENABLE_OAUTH21": "true",
+        "EXTERNAL_OAUTH21_PROVIDER": "true",
+        "WORKSPACE_MCP_STATELESS_MODE": "true",
+        "GOOGLE_OAUTH_CLIENT_ID": CLIENT_ID,
+        "GOOGLE_OAUTH_CLIENT_SECRET": "s",
+        "PUBLIC_URL": PUBLIC,
+        "MCP_ALLOWED_REDIRECT_URIS": CONSOLE_CB,
+    }.items():
+        monkeypatch.setenv(name, value)
+    reload_oauth_config()
+    monkeypatch.setattr(server_module, "configure_agentek_mode", lambda target: None)
+    server_module.set_transport_mode("streamable-http")
+    try:
+        server_module.configure_server_for_http()
+
+        assert isinstance(server_module.server.auth, OAuthProxyProvider)
+        assert server_module.get_auth_provider() is server_module.server.auth
+    finally:
+        server_module.close_auth_provider()
+        server_module.server.auth = None
+        monkeypatch.undo()
+        reload_oauth_config()
